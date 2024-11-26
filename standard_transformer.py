@@ -4,6 +4,9 @@ from copy import deepcopy
 from math import floor
 from time import time
 from typing import List, Tuple
+import pdb
+import yaml
+from pprint import pprint
 
 import lightning as L
 import pandas as pd
@@ -22,6 +25,7 @@ from kgraphs.dataprocessing.gutenberg_data import BasicDataset, DatasetFactory
 from kgraphs.lightning.base_autoregressive import BaseAutoregressive
 from kgraphs.models.models import Transformer
 from kgraphs.utils.logging import create_logger, time_to_largest_unit
+import debugpy
 
 # %% Some global initalization
 logger = create_logger("MAIN")
@@ -35,7 +39,6 @@ def argsies():
     ap.add_argument("--batch_size", default=16, type=int)
     ap.add_argument("--model_name", default="facebook/bart-base")
     ap.add_argument("--model_tokenwindow_size", default=1024)
-    ap.add_argument("--token_count_cap", default=10000)
     ap.add_argument("--model_dimension", default=768)
     ap.add_argument("--model_dimension_ff", default=3072)
     ap.add_argument("--num_layers", default=3)  # This is on the smaller side
@@ -44,15 +47,57 @@ def argsies():
     ap.add_argument("--masking_percentage", default=0.1)
     ap.add_argument("--raw_ds_location", default="./data/raw/")
     ap.add_argument("--seed", default=42,type=int)
+    ap.add_argument("--stream", action="store_true", help="Whether or not to simmply stream all documents. (Local documents are not exhaustive")
 
     ap.add_argument("--chkpnt_loc", default="./checkpoints", type=str)
+
+    group = ap.add_mutually_exclusive_group()
+    group.add_argument("--training_steps", type=int)
+    group.add_argument("--token_count_cap")
 
     ap.add_argument("-w", "--wandb", action="store_true")
     ap.add_argument("--wandb_project_name", help="Project name", type=str)
     ap.add_argument("--wr_name", help="Wand Run Name", type=str)
     ap.add_argument("--wr_notes", help="Wand Run Notes", type=str)
 
+    ap.add_argument("--debug", action="store_true", help="Whether to debug using debugpy")
+    ap.add_argument("--preferred_config", type=str, default="./configs/best_config.yaml")
+
+    early_stopping = ap.add_argument_group("Early Stopping")
+    early_stopping.add_argument("--early_stopping_steps", type=int, default=10)
+    early_stopping.add_argument("--early_stopping_min_delta", type=float, default=0.001)
+
+    args = ap.parse_args()
+
+    ########################################
+    # Important! 
+    # We override the args with the yaml:
+    # (So we can store training configs in a yaml file)
+    ########################################
+    args = overload_parse_defaults_with_yaml(args.preferred_config, args)
+
     return ap.parse_args()
+
+def overload_parse_defaults_with_yaml(yaml_location:str, args: argparse.Namespace):
+    with open(yaml_location, "r") as f:
+        yaml_args = yaml.load(f, Loader=yaml.FullLoader)
+        overloaded_args = recurse_til_leaf(yaml_args)
+        for k, v in overloaded_args.items():
+            if k in args.__dict__:
+                args.__dict__[k] = v
+            else:
+                raise ValueError(f"Key {k} not found in args")
+
+def recurse_til_leaf(d: dict, parent_key: str = "") -> dict:
+    return_dict = {}
+    for k, v in d.items():
+        next_key = f"{parent_key}_{k}" if parent_key != "" else k
+        if isinstance(v, dict):
+            deep_dict = recurse_til_leaf(v, parent_key=next_key)
+            return_dict.update(deep_dict)
+        else:
+            return_dict[next_key] = v
+    return return_dict
 
 def set_all_seeds(seed):
     torch.manual_seed(seed)
@@ -78,6 +123,13 @@ if __name__ == "__main__":
     start_time = time()
     args = argsies()
 
+    if args.debug:
+        # We listen for this in 
+        debugpy.listen(42020)
+        print("Waiting for debugger to connect...")
+        debugpy.wait_for_client()
+        print("Client Connected.")
+
     # Initialize wandb
     if args.wandb:
         wandb.init(project="kgraphs")
@@ -91,12 +143,14 @@ if __name__ == "__main__":
     for param in embedding_layer.parameters():
         param.requires_grad = False
 
+    print(f"Dataset Raw: {args.raw_ds_location}")
     dataset = DatasetFactory(
         dataset_name=args.dataset_name,
         ptrnd_tknzr=tokenizer,
         window_size=args.model_tokenwindow_size,
         amnt_tkns_for_training=args.token_count_cap,
         ds_location=args.raw_ds_location,
+        stream=args.stream
     )
 
     # data_module = DataModule()
@@ -133,6 +187,10 @@ if __name__ == "__main__":
         tokenizer.pad_token_id,
         embedding_layer,  # type: ignore
     ).to(device)
+    # Output the amount of a parameters in the modelgru
+    print(f"Model has {sum(p.numel() for p in model.parameters())} parameters")
+
+
     # Wrap it in the lightning Module
     lightning_module = BaseAutoregressive(model, tokenizer)
 
@@ -174,7 +232,8 @@ if __name__ == "__main__":
     # )
 
     logger.info("Starting to train the model")
-    trainer.fit(lightning_module, train_dl, val_dl,ckpt_path="./checkpoints/epoch=0-step=2330.ckpt")
+    # trainer.fit(lightning_module, train_dl, val_dl, ckpt_path="./checkpoints/epoch=0-step=2330.ckpt")
+    trainer.fit(lightning_module, train_dl, val_dl)
 
     exit()
 

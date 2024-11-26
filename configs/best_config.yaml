@@ -1,0 +1,18 @@
+dataset_name: "manu/project_gutenberg"
+model_name: "facebook/bart-base"
+batch_size: 16
+model_tokenwindow_size: 1024
+model_dimension: 768
+model_dimension_ff: 3072
+num_layers: 3
+num_heads: 8
+dropout_rate: 0.1
+masking_percentage: 0.1
+seed: 42069
+stream: True
+chkpnt_loc: "./checkpoints/"
+training_steps: 100
+early_stopping: # Mutually exclusive
+  steps: 5
+  min_delta: 0.001
+# token_count_cap: 10000 #
