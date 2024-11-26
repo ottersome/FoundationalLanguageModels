@@ -476,6 +476,175 @@ class DatasetFactory:
         return token_windows
 
 
+class DatasetStream:
+    SUPP_CTX_LEN = 128  # Supplementary Context Length
+    LANGUAGE = "english"
+
+    SPACE_PERC_THRESH = 0.1
+    NUM_FILES_TO_CACHE_INTO = 100  # CHECK: if you rly want to use
+    MIN_NUMBER_WORDS = 15
+    WINDOW_OVERLAP = 128  # CHECK: implement if necessary
+    GARBAGE_COLLECTION_THRESHOLD = 900
+    REMOVE_REGEXES = [
+        r"(?i)^\s*(Chapter|Section|Part)\s+\w+",  # Headings
+        r"^\s*\d+(\.\d+)*\s+.*$",  # Numerical Patterns
+        r"^\s*(M{0,4}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3}))\s*$",  # Roman Numerals
+        r"\[\d+\]",  # References
+    ]
+
+    def __init__(
+        self,
+        dataset_name: str,
+        ptrnd_tknzr: PreTrainedTokenizer,
+        window_size: int,
+        amnt_tkns_for_training: int = -1,
+        split: Tuple = (0.85, 0.15, 0),
+        ds_location: str = "",
+        stream: bool = False,
+    ):
+        """
+        dataset_name: usually just the same one
+        ptrnd_tknzr: PreTrainedTokenizer,
+        ds_size:
+        window_size: int: How big of a window we will have when training language model
+        tokenizer_cap: int = How many tokenizers for dataset. Mostly for keeping test trains fast
+        """
+
+        assert sum(split) == 1, "Split percentages must some to 1"
+        self.logger = create_logger(__class__.__name__, INFO)
+        self.dataset_name = dataset_name
+        self.window_size = window_size
+        self.tknzr = ptrnd_tknzr
+        self.split = split
+
+        # Samples Processed will be used to resume training from checkpoint
+        self.samples_processed = 0
+
+        # Read "data/gutenberg-metadata.json"
+        self.metadata = json.load(open("data/gutenberg-metadata.json"))
+
+    def _initialize_regex(self) -> List[re.Pattern]:
+        return [re.compile(r) for r in self.REMOVE_REGEXES]
+
+    def get_dataset_iter(self) -> Iterable[Any]:
+        return TextStream(
+            load_dataset(self.dataset_name, split="en", streaming=True)
+        )
+
+    # Probably used till later
+
+    def _compute_ds(self):
+        """
+
+        """
+        dataset_iter = self.get_dataset_iter()
+        train: List[List[int]] = [] # LIst of tokens? List[int] is a document so We have List[Document] ?
+        cap = 2
+        b = tqdm(total=cap + 1)
+        self.cur_amount_of_tokens = 0
+
+        clean_regexes = self._initialize_regex()
+        windows_added = 0
+
+        self.logger.debug("We are about to enter the dataset_iteration")
+        for i, (doc_content, doc_name) in enumerate(dataset_iter):
+            if self.cur_amount_of_tokens > self.amnt_tkns_for_trning:
+                break
+
+            # Check for language before processing
+            PG_id = (str(doc_name).split("/")[-1].split("_")[0]).replace("PG", "")
+            self.logger.debug(f"Checking PG_id {PG_id} for language")
+            lang_id = self.metadata[PG_id]["language"][0]
+
+            if lang_id == "en":
+                new_list_of_tokens = self._doc(doc_content, b, clean_regexes)  # type:ignore
+                # Here is where we add windows.
+                self.logger.debug(f"Have added {len(new_list)} windows to our dataset")
+                train += new_list  # type:ignore
+                # Train contains a list of windows
+                windows_added += len(new_list)
+                b.set_description(f"Added {windows_added} samples")
+            else:
+                self.logger.debug(
+                    f"Skipping file {doc_name} becuase language {lang_id} != {self.LANGUAGE}"
+                )
+            b.update(1)
+
+            # Spread into the self.FILES_TO_CACHE_INTO
+            # We only store the windows once we have enough
+            if len(train) >= self.GARBAGE_COLLECTION_THRESHOLD:
+                b.set_description(f"Garbage Collectin with len(train) = {len(train)}")
+                self._garbage_collection_split(train)
+                train.clear()
+
+        # At the very end do one last round of garbage collection
+        self._garbage_collection_split(train)
+
+        # List to pretty, indent json
+        # self.logger.info(f"Final Train boi is \n{train}")
+        # pretty_list = json.dumps(train, indent=4) # DEBUG: remove
+        # f.write(pretty_list)
+        # f.close()
+        # Once that is all good we cache it in some parquet file
+
+    def _cache_tokenized(self, samples_list):
+        df = pd.DataFrame(samples_list)
+        # TODO: finish
+        # df.to_parquet(
+
+    def _doc_to_window_iterator(
+        self, doc: str, removal_rgxs: List[re.Pattern]
+    ) -> Iterator[List[int]]:
+        """Im so sorry"""
+        copy_doc = copy.deepcopy(doc)
+        while len(copy_doc) > 1:
+            return_tokens = []
+            while len(return_tokens) < self.window_size:
+                next_newline = copy_doc.find("\n")
+                clean_seg = clean_segment(copy_doc[:next_newline], removal_rgxs)
+
+                left_overs = []
+                if len(clean_seg) != 0:
+                    word_split = clean_seg.split(" ")
+                    words_used, left_overs = self._process_words(
+                        word_split, return_tokens
+                    )
+
+                if next_newline == -1 and len(left_overs) == 0:
+                    return ""
+                copy_doc = str(" ".join(left_overs)) + copy_doc[next_newline + 1 :]
+
+            yield return_tokens
+
+    def _process_words(
+        self, word_split: List[str], return_tokens: List[int]
+    ) -> Tuple[int, List[str]]:
+        words_used = 0
+        left_overs = []
+        for word in word_split:
+            words_used += 1
+            enc_word = self.tknzr.encode(word, add_special_tokens=False)
+            space_avail = self.window_size - len(return_tokens)
+            return_tokens += enc_word[:space_avail]
+
+            if len(return_tokens) >= self.window_size:
+                left_overs = word_split[words_used:]
+                break
+        return words_used, left_overs
+
+    def _doc(
+        self, doc: str, bar: tqdm, clean_regexs: List[re.Pattern]
+    ) -> List[List[int]]:
+        doc = strip_headers(doc)
+        tkn_win_iterator = self._doc_to_window_iterator(doc, clean_regexs)
+        token_windows = []
+
+        # While we can iterate over doc_tokenizer
+        for tkn_win in tkn_win_iterator:
+            ## Cleaning
+            token_windows.append(tkn_win)
+        return token_windows
+
 def clean_segment(segment: str, removal_rgxs: List[re.Pattern]) -> str:
     ### Miscelannea Round
     tot_len = len(segment)
