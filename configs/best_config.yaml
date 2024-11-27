@@ -18,4 +18,4 @@ early_stopping: # Mutually exclusive
 # token_count_cap: 10000 #
 
 # Not quite hyperparameters
-stream_buffer_size: 100 # Units: Entire Documents
+stream_buffer_size: 20 # Units: Entire Documents

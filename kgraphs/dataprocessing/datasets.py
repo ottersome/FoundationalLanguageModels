@@ -1,7 +1,8 @@
-from typing import Any, List
+from typing import Any, List, Tuple
 import pandas as pd
 import torch
 from datasets import load_dataset
+from tqdm import tqdm
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
 import random
@@ -68,6 +69,16 @@ class GutenbergDataset(Dataset):
             "labels": labels
         }
 
+class DerivativeNonStreamedDataset(Dataset):
+    def __init__(self, split_list: List[List[int]]):
+        self.split_list = split_list
+
+    def __len__(self):
+        return len(self.split_list)
+
+    def __getitem__(self, idx):
+        return torch.LongTensor(self.split_list[idx])
+
 
 class GutenbergDatasetStreamed(IterableDataset):
     """
@@ -83,7 +94,13 @@ class GutenbergDatasetStreamed(IterableDataset):
     ]
 
     def __init__(
-        self, dataset_stream_name: str, buffer_size: int, window_size: int, tokenizer_name: str, number_of_windows_in_batch: int
+        self,
+        dataset_stream_name: str,
+        buffer_size: int,
+        window_size: int,
+        tokenizer_name: str,
+        number_of_windows_in_batch: int,
+        split : Tuple[float, float, float],
     ):
         self.buffer_size = buffer_size
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
@@ -108,19 +125,39 @@ class GutenbergDatasetStreamed(IterableDataset):
         self.current_window_in_buffer_offset = 0
         self.windows_corresponding_to_buffer = []
         self.regexes = [re.compile(r) for r in self.REMOVE_REGEXES]
+        self.split = split
+
+        # For Validation and Testing
+        # These should be done on a per batch basis
+        self.validation_windows = []
+        self.test_windows = []
+
+        self.initialize_buffer()
+
+    def get_validation_windows(self):
+        assert len(self.test_windows) != 0, "validation windows are empty"
+        return self.validation_windows  
+
+    def get_test_windows(self):
+        assert len(self.test_windows) != 0, "test windows are empty"
+        return self.test_windows
 
     def initialize_buffer(self):
-        self.buffer = list(islice(self.dataset_stream, self.buffer_size))
-        random.shuffle(self.buffer)
+        self._load_more_buffer()
 
-    def _load_more_buffer(self) -> List[str]:
+    def _load_more_buffer(self):
         # NOTE: The `islice` will move the `self.dataset_stream` iterator forward
         self.logger.info(f"Checking for more buffer with {self.buffer_size} items")
-        new_buffer  = [id_text_dict["text"] for id_text_dict in islice(self.dataset_stream, self.buffer_size)]
-        random.shuffle(new_buffer)
-        self.stream_pointer += self.buffer_size
+        self.buffer  = [id_text_dict["text"] for id_text_dict in islice(self.dataset_stream, self.buffer_size)]
+        random.shuffle(self.buffer)
+
+        self.windows_corresponding_to_buffer = self.buffer_to_windows(self.buffer)
+        self.current_window_in_buffer_offset = 0
         self.logger.info(f"Done downloading more buffer")
-        return new_buffer 
+
+        # Likewise we reserve some of those windows for validation and testing
+        self._reserve_for_validation(self.windows_corresponding_to_buffer)
+
 
     def buffer_to_windows(self, buffer: List[str], shuffle_windows: bool = False) -> List[Any]:
         """
@@ -129,13 +166,20 @@ class GutenbergDatasetStreamed(IterableDataset):
             I do'nt think this is is necessary
         """
         buffer_windows = []
-        for doc in buffer:
+        for doc in tqdm(buffer, desc="Converting Buffer to Windows"):
             buffer_windows += self._doc_to_windows(doc)
 
         if shuffle_windows:
             random.shuffle(buffer_windows)
 
         return buffer_windows
+
+    def _reserve_for_validation(self, buffer_windows: List[Any]):
+        num_limit_train = int(self.split[0] * len(buffer_windows))
+        num_limit_val = int(self.split[1] * len(buffer_windows))
+
+        self.validation_windows = buffer_windows[num_limit_train : num_limit_train + num_limit_val]
+        self.test_windows = buffer_windows[num_limit_train + num_limit_val :]
 
     def there_still_batches(self) -> bool:
         """
@@ -165,10 +209,8 @@ class GutenbergDatasetStreamed(IterableDataset):
             if still_needed_windows > 0:
                 # widows_to_return = self.windows_corresponding_to_buffer[self.current_window_in_buffer_offset:]
                 self.logger.info(f"Buffer is empty, filling it")
-                self.buffer = self._load_more_buffer()
-                self.windows_corresponding_to_buffer = self.buffer_to_windows(self.buffer)
+                self._load_more_buffer()
                 self.logger.info(f"New Number of windows in buffer is {len(self.windows_corresponding_to_buffer)}")
-                self.current_window_in_buffer_offset = 0
 
                 if still_needed_windows > 0:
                     windows_to_return += self.windows_corresponding_to_buffer[ 0 : 0 + still_needed_windows ]
@@ -180,7 +222,7 @@ class GutenbergDatasetStreamed(IterableDataset):
                 len(windows_to_return) == self.windows_per_batch
             ), "You are not returning batch_size windows to your model"
 
-            yield windows_to_return
+            yield torch.LongTensor(windows_to_return)
         
 
     def _doc_to_windows(self, doc: str) -> List[List[int]]: 

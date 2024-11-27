@@ -1,32 +1,24 @@
 # %% Important imports
 import argparse
 from copy import deepcopy
-from math import floor
 from time import time
-from typing import List, Tuple
-import pdb
 import yaml
-from pprint import pprint
 
 import lightning as L
-import pandas as pd
 import torch
-import torch.nn.functional as F
 import wandb
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.tuner.tuning import Tuner
-from tqdm import tqdm
 from transformers import AutoTokenizer, BartModel, BartTokenizer
-from transformers.tokenization_utils_fast import TokenizerFast
 
-from kgraphs.dataprocessing.gutenberg_data import BasicDataset, DatasetFactory
 from kgraphs.lightning.base_autoregressive import BaseAutoregressive
 from kgraphs.models.models import Transformer
-from kgraphs.utils.logging import create_logger, time_to_largest_unit
-from kgraphs.dataprocessing.datasets import TextDataSet 
+from kgraphs.utils.logging import create_logger
 from kgraphs.dataprocessing.lightning import DocumentDataModule
 import debugpy
+from rich import traceback
+traceback.install()
 
 # %% Some global initalization
 logger = create_logger("MAIN")
@@ -64,6 +56,7 @@ def argsies():
 
     ap.add_argument("--debug", action="store_true", help="Whether to debug using debugpy")
     ap.add_argument("--preferred_config", type=str, default="./configs/best_config.yaml")
+    ap.add_argument("--split", type=float, nargs=3, default=[0.85, 0.15, 0])
 
     early_stopping = ap.add_argument_group("Early Stopping")
     early_stopping.add_argument("--early_stopping_steps", type=int, default=10)
@@ -78,7 +71,7 @@ def argsies():
     ########################################
     args = overload_parse_defaults_with_yaml(args.preferred_config, args)
 
-    return ap.parse_args()
+    return args
 
 def overload_parse_defaults_with_yaml(yaml_location:str, args: argparse.Namespace):
     with open(yaml_location, "r") as f:
@@ -86,9 +79,12 @@ def overload_parse_defaults_with_yaml(yaml_location:str, args: argparse.Namespac
         overloaded_args = recurse_til_leaf(yaml_args)
         for k, v in overloaded_args.items():
             if k in args.__dict__:
-                args.__dict__[k] = v
+                # args.__dict__[k] = v
+                # Change the property not they key
+                setattr(args, k, v)
             else:
                 raise ValueError(f"Key {k} not found in args")
+    return args
 
 def recurse_til_leaf(d: dict, parent_key: str = "") -> dict:
     return_dict = {}
@@ -137,8 +133,6 @@ if __name__ == "__main__":
     for param in embedding_layer.parameters():
         param.requires_grad = False
 
-    print(f"Dataset Raw: {args.raw_ds_location}")
-    
     ########################################
     # Data Creation
     ########################################
@@ -148,16 +142,15 @@ if __name__ == "__main__":
         args.batch_size,
         args.model_tokenwindow_size,
         args.pretrained_transformer_name,
+        args.split,
     )
+    logger.info(f"Data Module for {args.dataset_name} is ready")
 
     # TODO: Change this with out own preference
     # val_dl = DataLoader(
     #     val_ds, batch_size=args.batch_size, drop_last=True, num_workers=1
     # )
     # test_it = next(iter(train_dl))
-
-    logger.info(f"Loadad Train Dataset with {len(train_ds)} samples")
-    logger.info(f"Loadad Val Dataset with {len(val_ds)} samples")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = Transformer(
@@ -170,6 +163,7 @@ if __name__ == "__main__":
         tokenizer.pad_token_id,
         embedding_layer,  # type: ignore
     ).to(device)
+
     # Output the amount of a parameters in the modelgru
     print(f"Model has {sum(p.numel() for p in model.parameters())} parameters")
 
@@ -205,18 +199,19 @@ if __name__ == "__main__":
         enable_checkpointing=True,
         callbacks=[checkpoint_callback],
     )
-    # TODO: its having some problems right now
-    tuner = Tuner(trainer)
-    tuner.scale_batch_size(
-        lightning_module,
-        train_dataloaders=train_dl,
-        val_dataloaders=val_dl,
-        mode="binsearch",
-    )
 
+    # TODO: its having some problems right now
+    # tuner = Tuner(trainer)
+    # tuner.scale_batch_size(
+    #     lightning_module,
+    #     train_dataloaders=train_dl,
+    #     val_dataloaders=val_dl,
+    #     mode="binsearch",
+    # )
+    
     logger.info("Starting to train the model")
     # trainer.fit(lightning_module, train_dl, val_dl, ckpt_path="./checkpoints/epoch=0-step=2330.ckpt")
-    trainer.fit(lightning_module, train_dl, val_dl)
+    trainer.fit(lightning_module, datamodule=data_lmodule)
 
     exit()
 

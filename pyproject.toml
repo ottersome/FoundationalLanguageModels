@@ -22,6 +22,10 @@ lxml = "^5.2.2"
 [tool.poetry.group.extras.dependencies]
 ipython = "8.18.1"
 
+
+[tool.poetry.group.dev.dependencies]
+rich = "^13.9.4"
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
