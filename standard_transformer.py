@@ -25,6 +25,7 @@ from kgraphs.lightning.base_autoregressive import BaseAutoregressive
 from kgraphs.models.models import Transformer
 from kgraphs.utils.logging import create_logger, time_to_largest_unit
 from kgraphs.dataprocessing.datasets import TextDataSet 
+from kgraphs.dataprocessing.lightning import DocumentDataModule
 import debugpy
 
 # %% Some global initalization
@@ -37,7 +38,7 @@ def argsies():
     # Hyperparameters
     ap.add_argument("--epochs", default=10)
     ap.add_argument("--batch_size", default=16, type=int)
-    ap.add_argument("--model_name", default="facebook/bart-base")
+    ap.add_argument("--pretrained_transformer_name", default="facebook/bart-base")
     ap.add_argument("--model_tokenwindow_size", default=1024)
     ap.add_argument("--model_dimension", default=768)
     ap.add_argument("--model_dimension_ff", default=3072)
@@ -48,6 +49,7 @@ def argsies():
     ap.add_argument("--raw_ds_location", default="./data/raw/")
     ap.add_argument("--seed", default=42,type=int)
     ap.add_argument("--stream", action="store_true", help="Whether or not to simmply stream all documents. (Local documents are not exhaustive")
+    ap.add_argument("--stream_buffer_size", type=int, help="Size of buffer (unit: entire documetns) to keep before streaming more in.")
 
     ap.add_argument("--chkpnt_loc", default="./checkpoints", type=str)
 
@@ -128,47 +130,36 @@ if __name__ == "__main__":
     set_all_seeds(args.seed)
 
     # Load the Tokenizer
-    tokenizer: BartTokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    model_itself = BartModel.from_pretrained(args.model_name)
+    tokenizer: BartTokenizer = AutoTokenizer.from_pretrained(args.pretrained_transformer_name)
+    model_itself = BartModel.from_pretrained(args.pretrained_transformer_name)
     # Get only the embedding layer of this model
     embedding_layer = model_itself.get_input_embeddings()  # type: ignore
     for param in embedding_layer.parameters():
         param.requires_grad = False
 
     print(f"Dataset Raw: {args.raw_ds_location}")
-    dataset = DatasetFactory(
-        dataset_name=args.dataset_name,
-        ptrnd_tknzr=tokenizer,
-        window_size=args.model_tokenwindow_size,
-        amnt_tkns_for_training=args.token_count_cap,
-        ds_location=args.raw_ds_location,
-        stream=args.stream
+    
+    ########################################
+    # Data Creation
+    ########################################
+    data_lmodule = DocumentDataModule( # Data Lightning Module
+        args.dataset_name,
+        args.stream_buffer_size,
+        args.batch_size,
+        args.model_tokenwindow_size,
+        args.pretrained_transformer_name,
     )
 
-    # data_module = DataModule()
-    ds: Tuple[pd.DataFrame, ...] = dataset.load_split()
-    train_df, val_df, test_df = ds
-    logger.info(f"Size of train_ds {train_df.shape}")
-    train_ds = TextDataSet(train_df)
-    val_ds = TextDataSet(val_df)
-    train_dl = DataLoader(
-        train_ds,
-        batch_size=args.batch_size,
-        # shuffle=True,
-        drop_last=True,
-        num_workers=1,
-    )
-    val_dl = DataLoader(
-        val_ds, batch_size=args.batch_size, drop_last=True, num_workers=1
-    )
-
-    test_it = next(iter(train_dl))
+    # TODO: Change this with out own preference
+    # val_dl = DataLoader(
+    #     val_ds, batch_size=args.batch_size, drop_last=True, num_workers=1
+    # )
+    # test_it = next(iter(train_dl))
 
     logger.info(f"Loadad Train Dataset with {len(train_ds)} samples")
     logger.info(f"Loadad Val Dataset with {len(val_ds)} samples")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # Load the model
     model = Transformer(
         args.model_dimension,
         args.num_heads,
