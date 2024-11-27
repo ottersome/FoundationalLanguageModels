@@ -687,24 +687,47 @@ def textblock_to_window_iterator(
             next_newline = copy_doc.find("\n")
             clean_seg = clean_segment(copy_doc[:next_newline], removal_rgxs)
 
-            left_overs = []
+            left_overs = ""
             if len(clean_seg) != 0:
-                word_split = clean_seg.split(" ")
+                # word_split = clean_seg.split(" ")
                 num_tokens_so_far = len(return_tokens)
                 tokens_collected, left_overs = process_words(
-                    num_tokens_so_far,  tokenizer, window_size, word_split
+                    num_tokens_so_far, tokenizer, window_size, clean_seg
                 )
                 return_tokens += tokens_collected
 
             if next_newline == -1 and len(left_overs) == 0:
                 return ""
-            copy_doc = str(" ".join(left_overs)) + copy_doc[next_newline + 1 :]
+            copy_doc = left_overs + copy_doc[next_newline + 1 :]
 
         yield return_tokens
 
 
-# NOTE: Should replaace the ones inside the class
 def process_words(
+    preexisting_num_tokens: int,
+    tokenizer: PreTrainedTokenizer,
+    window_size: int,
+    clean_seg: str,
+) -> Tuple[List[int], str]:
+    """
+    word_split: List[str]: The words to be processed. Generally separated by spaces.
+    returns:
+        - List[int]: The tokens collected
+        - List[str]: The leftovers
+    """
+    tokens_collected = []
+    num_tokens_so_far = preexisting_num_tokens
+    space_avail = window_size - num_tokens_so_far
+
+    encoded_seg = tokenizer.encode(clean_seg, add_special_tokens=False)
+    tokens_collected = encoded_seg[:space_avail]
+    left_overs = tokenizer.decode(encoded_seg[space_avail:])
+
+    return tokens_collected, left_overs
+
+
+# NOTE: Should replaace the ones inside the class
+def process_words_without_space(
     preexisting_num_tokens: int,
     tokenizer: PreTrainedTokenizer,
     window_size: int,
