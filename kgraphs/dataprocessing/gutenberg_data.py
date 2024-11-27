@@ -465,6 +465,7 @@ class DatasetFactory:
     def _doc(
         self, doc: str, bar: tqdm, clean_regexs: List[re.Pattern]
     ) -> List[List[int]]:
+        # TODO: Lol clean this up into a single line or two
         doc = strip_headers(doc)
         tkn_win_iterator = self._doc_to_window_iterator(doc, clean_regexs)
         token_windows = []
@@ -527,18 +528,16 @@ class DatasetStream:
         return [re.compile(r) for r in self.REMOVE_REGEXES]
 
     def get_dataset_iter(self) -> Iterable[Any]:
-        return TextStream(
-            load_dataset(self.dataset_name, split="en", streaming=True)
-        )
+        return TextStream(load_dataset(self.dataset_name, split="en", streaming=True))
 
     # Probably used till later
 
     def _compute_ds(self):
-        """
-
-        """
+        """ """
         dataset_iter = self.get_dataset_iter()
-        train: List[List[int]] = [] # LIst of tokens? List[int] is a document so We have List[Document] ?
+        train: List[List[int]] = (
+            []
+        )  # LIst of tokens? List[int] is a document so We have List[Document] ?
         cap = 2
         b = tqdm(total=cap + 1)
         self.cur_amount_of_tokens = 0
@@ -557,7 +556,9 @@ class DatasetStream:
             lang_id = self.metadata[PG_id]["language"][0]
 
             if lang_id == "en":
-                new_list_of_tokens = self._doc(doc_content, b, clean_regexes)  # type:ignore
+                new_list_of_tokens = self._doc(
+                    doc_content, b, clean_regexes
+                )  # type:ignore
                 # Here is where we add windows.
                 self.logger.debug(f"Have added {len(new_list)} windows to our dataset")
                 train += new_list  # type:ignore
@@ -645,6 +646,7 @@ class DatasetStream:
             token_windows.append(tkn_win)
         return token_windows
 
+
 def clean_segment(segment: str, removal_rgxs: List[re.Pattern]) -> str:
     ### Miscelannea Round
     tot_len = len(segment)
@@ -668,3 +670,67 @@ def clean_segment(segment: str, removal_rgxs: List[re.Pattern]) -> str:
 
     final_segment = segment.strip()
     return final_segment
+
+
+def textblock_to_window_iterator(
+    doc: str,
+    removal_rgxs: List[re.Pattern],
+    tokenizer: PreTrainedTokenizer,
+    window_size: int,
+) -> Iterator[List[int]]:
+    copy_doc = copy.deepcopy(doc)
+
+    while len(copy_doc) > 1:
+        return_tokens = []
+
+        while len(return_tokens) < window_size:
+            next_newline = copy_doc.find("\n")
+            clean_seg = clean_segment(copy_doc[:next_newline], removal_rgxs)
+
+            left_overs = []
+            if len(clean_seg) != 0:
+                word_split = clean_seg.split(" ")
+                num_tokens_so_far = len(return_tokens)
+                tokens_collected, left_overs = process_words(
+                    num_tokens_so_far,  tokenizer, window_size, word_split
+                )
+                return_tokens += tokens_collected
+
+            if next_newline == -1 and len(left_overs) == 0:
+                return ""
+            copy_doc = str(" ".join(left_overs)) + copy_doc[next_newline + 1 :]
+
+        yield return_tokens
+
+
+# NOTE: Should replaace the ones inside the class
+def process_words(
+    preexisting_num_tokens: int,
+    tokenizer: PreTrainedTokenizer,
+    window_size: int,
+    word_split: List[str],
+) -> Tuple[List[int], List[str]]:
+    """
+    word_split: List[str]: The words to be processed. Generally separated by spaces.
+    returns:
+        - List[int]: The tokens collected
+        - List[str]: The leftovers
+    """
+    words_used = 0
+    left_overs = []
+    tokens_collected = []
+    num_tokens_so_far = preexisting_num_tokens
+    for word in word_split:
+        words_used += 1
+        enc_word = tokenizer.encode(word, add_special_tokens=False)
+        space_avail = window_size - num_tokens_so_far
+        added_tokens = enc_word[:space_avail]
+        tokens_collected += added_tokens
+        num_tokens_so_far += len(added_tokens)
+
+        # TODO: I think it should be here that we want to introduce overlap. Though I am not entirely sure.
+        # Not pressing. Think about it if it ever becomes reasonable.
+        if num_tokens_so_far >= window_size:
+            left_overs = word_split[words_used:]
+            break
+    return tokens_collected, left_overs

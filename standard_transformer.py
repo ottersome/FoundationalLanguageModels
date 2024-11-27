@@ -16,7 +16,6 @@ import wandb
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.tuner.tuning import Tuner
-from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from transformers import AutoTokenizer, BartModel, BartTokenizer
 from transformers.tokenization_utils_fast import TokenizerFast
@@ -25,6 +24,7 @@ from kgraphs.dataprocessing.gutenberg_data import BasicDataset, DatasetFactory
 from kgraphs.lightning.base_autoregressive import BaseAutoregressive
 from kgraphs.models.models import Transformer
 from kgraphs.utils.logging import create_logger, time_to_largest_unit
+from kgraphs.dataprocessing.datasets import TextDataSet 
 import debugpy
 
 # %% Some global initalization
@@ -107,15 +107,7 @@ def set_all_seeds(seed):
     torch.backends.cudnn.benchmark = False
 
 
-class TextDataSet(Dataset):
-    def __init__(self, data: pd.DataFrame):
-        self.data = data
 
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        return torch.tensor(self.data.iloc[idx].tolist()).to(torch.long)
 
 
 # %% Main Functions
@@ -223,13 +215,13 @@ if __name__ == "__main__":
         callbacks=[checkpoint_callback],
     )
     # TODO: its having some problems right now
-    # tuner = Tuner(trainer)
-    # tuner.scale_batch_size(
-    #     lightning_module,
-    #     train_dataloaders=train_dl,
-    #     val_dataloaders=val_dl,
-    #     mode="binsearch",
-    # )
+    tuner = Tuner(trainer)
+    tuner.scale_batch_size(
+        lightning_module,
+        train_dataloaders=train_dl,
+        val_dataloaders=val_dl,
+        mode="binsearch",
+    )
 
     logger.info("Starting to train the model")
     # trainer.fit(lightning_module, train_dl, val_dl, ckpt_path="./checkpoints/epoch=0-step=2330.ckpt")
